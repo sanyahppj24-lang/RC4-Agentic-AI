@@ -1,0 +1,9 @@
+attempt,action,sample_size,position,most_common_byte,bias_ratio,observed_probability
+1,,50000,1,0,1.72032,0.00672
+1,,50000,1,0,1.80736,0.00706
+1,50000,1,0,1.80224,0.00704
+2,100000,1,0,1.56928,0.00613
+3,200000,1,0,1.74592,0.00682
+1,50000,1,0,1.8022,1.0,False,
+2,100000,1,0,1.7075,1.0,False,increase_samples
+3,200000,1,0,1.641,1.0,False,increase_samples

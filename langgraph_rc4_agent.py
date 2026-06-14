@@ -1,12 +1,15 @@
 from typing import TypedDict, Optional, List, Dict, Any
 from langgraph.graph import StateGraph, END
 
+import time
+
 from dataset_tool import generate_dataset
 from position_discovery_tool import analyze_positions
 from memory_agent import MemoryAgent
 from rl_agent import RLAgent
 from report_agent import generate_report
 from validator_node import validate_bias
+from experiment_logger import (initialize_csv,log_experiment)
 
 
 # =========================================================
@@ -14,8 +17,11 @@ from validator_node import validate_bias
 # =========================================================
 
 class RC4AgentState(TypedDict):
+
     sample_size: int
+
     attempt: int
+
     max_attempts: int
 
     dataset_path: Optional[str]
@@ -33,7 +39,12 @@ class RC4AgentState(TypedDict):
     final_report: Optional[str]
 
 
+# =========================================================
+# GLOBAL AGENTS
+# =========================================================
+
 memory_agent = MemoryAgent()
+
 rl_agent = RLAgent()
 
 
@@ -43,19 +54,30 @@ rl_agent = RLAgent()
 
 def generate_data_node(state: RC4AgentState):
 
+    print("\n=================================================")
+    print("[DATA GENERATION NODE]")
+    print("=================================================")
+
+    sample_size = state.get("sample_size", 50000)
+
+    start = time.time()
+
     dataset_path = generate_dataset(
-        num_samples=state["sample_size"],
+        num_samples=sample_size,
         keystream_length=10
     )
 
-    print("\n[DATA GENERATION NODE]")
-    print("Generated dataset with:",
-          state["sample_size"],
-          "samples")
+    end = time.time()
+
+    print("Generated dataset")
+    print("Samples:", sample_size)
+    print("Time taken:", round(end - start, 2), "seconds")
 
     return {
         **state,
-        "dataset_path": dataset_path
+
+        "dataset_path":
+            dataset_path
     }
 
 
@@ -65,14 +87,21 @@ def generate_data_node(state: RC4AgentState):
 
 def analyze_node(state: RC4AgentState):
 
+    print("\n=================================================")
+    print("[ANALYSIS NODE]")
+    print("=================================================")
+
+    start = time.time()
+
     results_df = analyze_positions(
         dataset_path=state["dataset_path"],
         max_position=10
     )
 
+    end = time.time()
+
     best_result = results_df.iloc[0].to_dict()
 
-    print("\n[POSITION DISCOVERY TOOL]")
     print("Best position:",
           int(best_result["position"]))
 
@@ -88,9 +117,15 @@ def analyze_node(state: RC4AgentState):
     print("Bias ratio:",
           round(best_result["bias_ratio"], 4))
 
+    print("Analysis time:",
+          round(end - start, 2), "seconds")
+
     return {
+
         **state,
-        "best_result": best_result
+
+        "best_result":
+            best_result
     }
 
 
@@ -100,14 +135,22 @@ def analyze_node(state: RC4AgentState):
 
 def memory_node(state: RC4AgentState):
 
+    print("\n=================================================")
+    print("[MEMORY NODE]")
+    print("=================================================")
+
     best = state["best_result"]
 
     experiment = {
-        "attempt": state["attempt"],
 
-        "sample_size": state["sample_size"],
+        "attempt":
+            state.get("attempt", 1),
 
-        "position": int(best["position"]),
+        "sample_size":
+            state.get("sample_size", 50000),
+
+        "position":
+            int(best["position"]),
 
         "most_common_byte":
             int(best["most_common_byte"]),
@@ -120,14 +163,42 @@ def memory_node(state: RC4AgentState):
     }
 
     memory_agent.remember(experiment)
+    log_experiment({
 
-    print("\n[MEMORY AGENT]")
+    "attempt":
+        state["attempt"],
+
+    "sample_size":
+        state["sample_size"],
+
+    "position":
+        experiment["position"],
+
+    "most_common_byte":
+        experiment["most_common_byte"],
+
+    "bias_ratio":
+        experiment["bias_ratio"],
+
+    "confidence":
+        state.get("confidence", 1.0),
+
+    "validated":
+        state.get("validated", False),
+
+    "action":
+        state.get("action", "none")
+})
+
     print("Stored experiment:")
     print(experiment)
 
     return {
+
         **state,
-        "memory": memory_agent.get_history()
+
+        "memory":
+            memory_agent.get_history()
     }
 
 
@@ -136,6 +207,10 @@ def memory_node(state: RC4AgentState):
 # =========================================================
 
 def rl_decision_node(state: RC4AgentState):
+
+    print("\n=================================================")
+    print("[RL DECISION NODE]")
+    print("=================================================")
 
     best_bias = float(
         state["best_result"]["bias_ratio"]
@@ -153,7 +228,6 @@ def rl_decision_node(state: RC4AgentState):
 
     action = decision["action"]
 
-    print("\n[RL DECISION AGENT]")
     print("Chosen action:", action)
 
     print("Reward:",
@@ -163,8 +237,11 @@ def rl_decision_node(state: RC4AgentState):
     print(decision["q_values"])
 
     return {
+
         **state,
-        "action": action
+
+        "action":
+            action
     }
 
 
@@ -174,27 +251,80 @@ def rl_decision_node(state: RC4AgentState):
 
 def router_node(state: RC4AgentState):
 
-    action = state["action"]
+    print("\n=================================================")
+    print("[ROUTER NODE]")
+    print("=================================================")
 
-    print("\n[ROUTER NODE]")
-    print("Attempt:",
-          state["attempt"])
+    attempt = state.get("attempt", 1)
 
-    print("Action:",
-          action)
+    action = state.get("action", "report")
 
-    if state["attempt"] >= state["max_attempts"]:
+    print("Current attempt:", attempt)
+
+    print("Selected action:", action)
+
+    # =====================================================
+    # MAX ATTEMPT STOP
+    # =====================================================
+
+    if attempt >= state.get("max_attempts", 4):
 
         print("Max attempts reached")
         return "report"
 
+    # =====================================================
+    # CONVERGENCE CHECK
+    # =====================================================
+
+    memory = state.get("memory", [])
+
+    if len(memory) >= 3:
+
+        recent_biases = [
+            exp["bias_ratio"]
+            for exp in memory[-3:]
+        ]
+
+        avg_bias = (
+            sum(recent_biases)
+            / len(recent_biases)
+        )
+
+        bias_range = (
+            max(recent_biases)
+            - min(recent_biases)
+        )
+
+        print("\n[CONVERGENCE CHECK]")
+
+        print("Recent biases:",
+              recent_biases)
+
+        print("Average bias:",
+              round(avg_bias, 4))
+
+        print("Bias range:",
+              round(bias_range, 4))
+
+        if bias_range < 0.3:
+
+            print("Bias converged")
+            return "report"
+
+    # =====================================================
+    # NORMAL ROUTING
+    # =====================================================
+
     if action == "increase_samples":
+
         return "increase_samples"
 
     elif action == "validate_best":
+
         return "validate_best"
 
     elif action == "stop_and_report":
+
         return "report"
 
     return "report"
@@ -206,20 +336,35 @@ def router_node(state: RC4AgentState):
 
 def increase_samples_node(state: RC4AgentState):
 
-    new_sample_size = state["sample_size"] * 2
+    print("\n=================================================")
+    print("[INCREASE SAMPLE NODE]")
+    print("=================================================")
 
-    print("\n[INCREASE SAMPLE NODE]")
+    current_samples = state.get(
+        "sample_size",
+        50000
+    )
+
+    new_sample_size = current_samples * 2
+
+    MAX_SAMPLES = 1000000
+
+    if new_sample_size > MAX_SAMPLES:
+
+        new_sample_size = MAX_SAMPLES
+
     print("Increasing samples to:",
           new_sample_size)
 
     return {
+
         **state,
 
         "sample_size":
             new_sample_size,
 
         "attempt":
-            state["attempt"] + 1
+            state.get("attempt", 1) + 1
     }
 
 
@@ -229,15 +374,25 @@ def increase_samples_node(state: RC4AgentState):
 
 def validate_best_node(state: RC4AgentState):
 
+    print("\n=================================================")
+    print("[VALIDATION NODE]")
+    print("=================================================")
+
     validation = validate_bias(
         state["best_result"]
     )
 
     confidence = validation["confidence"]
 
-    current_samples = state["sample_size"]
+    current_samples = state.get(
+        "sample_size",
+        50000
+    )
 
-    # adaptive scaling
+    # =====================================================
+    # ADAPTIVE SCALING
+    # =====================================================
+
     if confidence < 1.2:
 
         new_sample_size = current_samples * 4
@@ -248,9 +403,15 @@ def validate_best_node(state: RC4AgentState):
 
     else:
 
-        new_sample_size = int(current_samples * 1.5)
+        new_sample_size = int(
+            current_samples * 1.5
+        )
 
-    print("\n[VALIDATION NODE]")
+    MAX_SAMPLES = 1000000
+
+    if new_sample_size > MAX_SAMPLES:
+
+        new_sample_size = MAX_SAMPLES
 
     print("Confidence:",
           round(confidence, 4))
@@ -262,13 +423,14 @@ def validate_best_node(state: RC4AgentState):
           new_sample_size)
 
     return {
+
         **state,
 
         "sample_size":
             new_sample_size,
 
         "attempt":
-            state["attempt"] + 1,
+            state.get("attempt", 1) + 1,
 
         "confidence":
             confidence,
@@ -284,17 +446,23 @@ def validate_best_node(state: RC4AgentState):
 
 def report_node(state: RC4AgentState):
 
+    print("\n=================================================")
+    print("[FINAL REPORT NODE]")
+    print("=================================================")
+
     report = generate_report(
         best_result=state["best_result"],
         memory=state["memory"]
     )
 
-    print("\n[FINAL REPORT]")
     print(report)
 
     return {
+
         **state,
-        "final_report": report
+
+        "final_report":
+            report
     }
 
 
@@ -344,7 +512,9 @@ graph.add_node(
 # ENTRY POINT
 # =========================================================
 
-graph.set_entry_point("generate_data")
+graph.set_entry_point(
+    "generate_data"
+)
 
 
 # =========================================================
@@ -372,11 +542,13 @@ graph.add_edge(
 # =========================================================
 
 graph.add_conditional_edges(
+
     "rl_decision",
 
     router_node,
 
     {
+
         "increase_samples":
             "increase_samples",
 
@@ -408,7 +580,7 @@ graph.add_edge(
 # =========================================================
 # COMPILE GRAPH
 # =========================================================
-
+initialize_csv()
 app = graph.compile()
 
 
@@ -418,25 +590,35 @@ app = graph.compile()
 
 initial_state = {
 
-    "sample_size": 50000,
+    "sample_size":
+        50000,
 
-    "attempt": 1,
+    "attempt":
+        1,
 
-    "max_attempts": 4,
+    "max_attempts":
+        4,
 
-    "dataset_path": None,
+    "dataset_path":
+        None,
 
-    "best_result": None,
+    "best_result":
+        None,
 
-    "action": None,
+    "action":
+        None,
 
-    "memory": [],
+    "memory":
+        [],
 
-    "confidence": 1.0,
+    "confidence":
+        1.0,
 
-    "validated": False,
+    "validated":
+        False,
 
-    "final_report": None
+    "final_report":
+        None
 }
 
 
@@ -444,7 +626,20 @@ initial_state = {
 # RUN GRAPH
 # =========================================================
 
-result = app.invoke(initial_state)
+try:
 
-print("\n[LANGGRAPH FINISHED]")
-print(result["final_report"])
+    result = app.invoke(initial_state)
+
+    print("\n=================================================")
+    print("[LANGGRAPH FINISHED]")
+    print("=================================================")
+
+    print(result["final_report"])
+
+except Exception as e:
+
+    print("\n=================================================")
+    print("[ERROR]")
+    print("=================================================")
+
+    print(str(e))

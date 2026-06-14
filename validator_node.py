@@ -1,22 +1,49 @@
+import math
+
+
 def validate_bias(best_result):
 
-    observed_probability = (
-        best_result["observed_probability"]
+    observed = best_result[
+        "observed_probability"
+    ]
+
+    expected = best_result[
+        "expected_probability"
+    ]
+
+    sample_size = best_result[
+        "sample_size"
+    ]
+
+    # =====================================================
+    # Z SCORE
+    # =====================================================
+
+    numerator = (
+        observed - expected
     )
 
-    target_probability = 0.0078
-
-    confidence = (
-        observed_probability /
-        target_probability
+    denominator = math.sqrt(
+        (
+            expected
+            * (1 - expected)
+        )
+        / sample_size
     )
 
-    validated = (
-        observed_probability >=
-        target_probability
-    )
+    z_score = numerator / denominator
+
+    # =====================================================
+    # VALIDATION
+    # =====================================================
+
+    validated = z_score > 3
 
     return {
-        "validated": validated,
-        "confidence": confidence
+
+        "confidence":
+            round(z_score, 4),
+
+        "validated":
+            validated
     }
